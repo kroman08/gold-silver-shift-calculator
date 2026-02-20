@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import re
 from datetime import datetime, date, timedelta
-import smtplib
-from email.message import EmailMessage
 
 # ============================================================
 # Embedded Shift Calculator Logic (from your provided app)
@@ -164,38 +162,11 @@ def build_ics(df: pd.DataFrame, duration_minutes: int = 60) -> str:
     ics += "END:VCALENDAR\n"
     return ics
 
-def send_email_smtp(
-    smtp_server: str,
-    smtp_port: int,
-    from_email: str,
-    password: str,
-    to_email: str,
-    subject: str,
-    body: str,
-    filename: str,
-    attachment_text: str,
-):
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = from_email
-    msg["To"] = to_email
-    msg.set_content(body)
-    msg.add_attachment(
-        attachment_text.encode("utf-8"),
-        maintype="text",
-        subtype="calendar",
-        filename=filename
-    )
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
-        server.starttls()
-        server.login(from_email, password)
-        server.send_message(msg)
-
 # ============================================================
-# Streamlit App
+# Streamlit App (NO EMAIL FEATURES)
 # ============================================================
 st.set_page_config(page_title="Gold/Silver Shift Scheduler", layout="centered")
-st.title("Gold/Silver Shift Scheduler (CSV → Outlook + Email)")
+st.title("Gold/Silver Shift Scheduler (CSV → Outlook .ics)")
 
 st.markdown(
     """
@@ -205,7 +176,7 @@ Upload a **CSV** export (from Numbers/Outlook/etc.). The app will:
 - compute **early/middle** using the embedded calculator logic (no website calls)
 - map to start times (**06:45** for early, **08:00** for middle)
 - let you download a processed CSV and an Outlook **.ics**
-- optionally email the **.ics**
+- show a “Rejected Events” table with detailed reasons
 """
 )
 
@@ -227,15 +198,18 @@ if uploaded:
     date_candidates = ["event_date", "Date", "Start Date", "Start", "Event Date", "Start_Date", "StartDate"]
 
     default_name = next((c for c in name_candidates if c in df_raw.columns), df_raw.columns[0])
-    default_date = next((c for c in date_candidates if c in df_raw.columns), df_raw.columns[min(1, len(df_raw.columns)-1)])
+    default_date = next((c for c in date_candidates if c in df_raw.columns),
+                        df_raw.columns[min(1, len(df_raw.columns)-1)])
 
     st.subheader("Column mapping")
-    name_col = st.selectbox("Event title column", options=list(df_raw.columns), index=list(df_raw.columns).index(default_name))
-    date_col = st.selectbox("Event date column", options=list(df_raw.columns), index=list(df_raw.columns).index(default_date))
+    name_col = st.selectbox("Event title column", options=list(df_raw.columns),
+                            index=list(df_raw.columns).index(default_name))
+    date_col = st.selectbox("Event date column", options=list(df_raw.columns),
+                            index=list(df_raw.columns).index(default_date))
 
     df = df_raw.rename(columns={name_col: "event_name", date_col: "event_date"}).copy()
 
-    # Parse titles with reasons
+    # Parse titles with smart reasons
     parsed = df["event_name"].apply(parse_event_title_with_reason)
     parsed_tuple_series = parsed.apply(lambda x: x[0])
     reason_series = parsed.apply(lambda x: x[1])
@@ -257,13 +231,12 @@ if uploaded:
     parsed_ok = parsed_tuple_series.loc[parsed_tuple_series.notna()]
     df_ok[["line", "num", "clean_event"]] = pd.DataFrame(parsed_ok.tolist(), index=df_ok.index)
 
-    # Parse dates (and show specific bad date rows)
+    # Parse dates (and reject rows with bad dates)
     df_ok["event_date_parsed"] = df_ok["event_date"].apply(parse_any_date)
     bad_dates = df_ok["event_date_parsed"].isna()
     if bad_dates.any():
         bad_df = df_ok.loc[bad_dates, ["event_name", "event_date"]].copy()
         bad_df["reason"] = "Date could not be parsed"
-        # Add to rejected list and remove from processing
         rejected_df = pd.concat([rejected_df, bad_df], ignore_index=True)
         df_ok = df_ok.loc[~bad_dates].copy()
 
@@ -309,7 +282,7 @@ if uploaded:
         mime="text/calendar"
     )
 
-    # Rejected Events
+    # Rejected Events (with download)
     if not rejected_df.empty:
         st.subheader("Rejected Events")
         st.caption("These rows were ignored; see the reason column.")
@@ -323,35 +296,3 @@ if uploaded:
             mime="text/csv"
         )
 
-    # Email
-    st.subheader("Email the Outlook calendar (.ics)")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        to_email = st.text_input("Send to")
-        smtp_server = st.text_input("SMTP server (e.g. smtp.gmail.com)")
-    with col2:
-        smtp_port = st.number_input("SMTP port", value=587, step=1)
-        from_email = st.text_input("From email")
-
-    password = st.text_input("Password / App Password", type="password")
-
-    if st.button("Send email"):
-        if not (to_email and smtp_server and from_email and password):
-            st.error("Please fill out To, SMTP server, From email, and Password/App Password.")
-        else:
-            try:
-                send_email_smtp(
-                    smtp_server=smtp_server,
-                    smtp_port=int(smtp_port),
-                    from_email=from_email,
-                    password=password,
-                    to_email=to_email,
-                    subject="Shift Schedule (Outlook .ics)",
-                    body="Attached is your shift schedule calendar file.",
-                    filename="shift_schedule.ics",
-                    attachment_text=ics_text
-                )
-                st.success("Email sent!")
-            except Exception as e:
-                st.error(f"Email failed: {e}")
